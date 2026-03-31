@@ -1,0 +1,680 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index ea92f636f934dfe75349fbf4616ed912a35f6594..7001d845fdd30f1ccb6cd12bc1010e04b0e6e8db 100644
+--- a/README.md
++++ b/README.md
+@@ -88,25 +88,30 @@ import timesfm
+ torch.set_float32_matmul_precision("high")
+ 
+ model = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
+ 
+ model.compile(
+     timesfm.ForecastConfig(
+         max_context=1024,
+         max_horizon=256,
+         normalize_inputs=True,
+         use_continuous_quantile_head=True,
+         force_flip_invariance=True,
+         infer_is_positive=True,
+         fix_quantile_crossing=True,
+     )
+ )
+ point_forecast, quantile_forecast = model.forecast(
+     horizon=12,
+     inputs=[
+         np.linspace(0, 1, 100),
+         np.sin(np.linspace(0, 20, 67)),
+     ],  # Two dummy inputs
+ )
+ point_forecast.shape  # (2, 12)
+ quantile_forecast.shape  # (2, 12, 10): mean, then 10th to 90th quantiles.
+ ```
++
++
++## Front-end demo app
++
++This repository now also includes a standalone front-end demo for interactive global cancer visualization in `apps/cancer-dashboard`. See `apps/cancer-dashboard/README.md` for setup, features, and data-source notes.
+diff --git a/apps/cancer-dashboard/README.md b/apps/cancer-dashboard/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5f04c0b7fe6f23665e302028311136afd54b029
+--- /dev/null
++++ b/apps/cancer-dashboard/README.md
+@@ -0,0 +1,88 @@
++# Global Cancer Dashboard
++
++An interactive front-end for exploring curated global cancer statistics from official sources.
++
++## Features
++
++- World choropleth map with hover summaries and click-to-drill country selection.
++- Country KPI cards for total cases, deaths, survival rate, and top cancers.
++- Trend chart for bundled yearly snapshots.
++- Region/state breakdowns for countries where official subnational data is bundled.
++- Filters for cancer type, search, year, and gender-oriented exploration.
++- Top-10 ranking list for rapid navigation.
++
++## Tech stack
++
++- Modern static front-end with vanilla ES modules
++- Plotly.js CDN for choropleth and chart rendering
++- Custom responsive CSS inspired by glassmorphism dashboards
++
++## Run locally
++
++```bash
++cd apps/cancer-dashboard
++python -m http.server 4173
++```
++
++Then open <http://localhost:4173>.
++
++## Data sources
++
++This dashboard bundles a curated dataset in `data.js` built from the most recent official releases available during development. Each country record includes direct source links.
++
++Primary sources referenced in the dataset:
++
++- WHO cancer fact sheet: <https://www.who.int/news-room/fact-sheets/detail/cancer>
++- IARC / Global Cancer Observatory (GLOBOCAN 2022 country fact sheets): <https://gco.iarc.who.int/>
++- CDC United States Cancer Statistics: <https://www.cdc.gov/united-states-cancer-statistics/>
++- India National Cancer Registry Programme: <https://ncdirindia.org/All_Reports/Report_2020/default.aspx>
++- Australian Institute of Health and Welfare cancer data: <https://www.aihw.gov.au/reports/cancer/cancer-data-in-australia>
++- South Africa National Cancer Registry: <https://www.nicd.ac.za/centres/national-cancer-registry/>
++- Cancer Research UK statistics: <https://www.cancerresearchuk.org/health-professional/cancer-statistics>
++
++## Notes on data quality
++
++- The app degrades gracefully for countries without a bundled record.
++- Regional drill-down is only shown where an official subnational snapshot is included.
++- The `gender` filter currently acts as an exploratory UI control because not every bundled source publishes sex-segmented values in a consistent shape.
++- Extend `data.js` with additional countries or years to deepen coverage.
++
++
++## Deploy on Vercel
++
++### Option A: Deploy from the Vercel Dashboard (recommended)
++
++1. Push this repository to GitHub.
++2. In Vercel, click **Add New Project** and import the GitHub repo.
++3. In **Project Settings → Build and Deployment** set:
++   - **Root Directory**: `apps/cancer-dashboard`
++   - **Framework Preset**: `Other`
++   - **Build Command**: *(leave empty)*
++   - **Output Directory**: *(leave empty)*
++4. Click **Deploy**.
++
++Because this app is static (`index.html`, `app.js`, `data.js`, `styles.css`), no build step is required.
++
++### Option B: Deploy with Vercel CLI
++
++```bash
++npm i -g vercel
++cd apps/cancer-dashboard
++vercel
++```
++
++For production promotion:
++
++```bash
++vercel --prod
++```
++
++### Included Vercel configuration
++
++This folder includes `vercel.json` with:
++- clean URLs
++- security headers
++- immutable cache headers for `.js` / `.css`
++- revalidation-friendly cache header for `.html`
++
++> If you deploy from the repository root instead of setting `apps/cancer-dashboard` as root directory, Vercel will deploy the wrong folder.
+diff --git a/apps/cancer-dashboard/app.js b/apps/cancer-dashboard/app.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0cf96af3689f01824c3c7bc3bef472b8a477da1
+--- /dev/null
++++ b/apps/cancer-dashboard/app.js
+@@ -0,0 +1,234 @@
++import { globalCancerDataset, globalKpis } from './data.js';
++
++const formatNumber = (value) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
++const formatRate = (value) => value.toFixed(1);
++
++const elements = {
++  dataScopeNote: document.querySelector('#data-scope-note'),
++  kpiGrid: document.querySelector('#kpi-grid'),
++  searchInput: document.querySelector('#search-input'),
++  cancerTypeFilter: document.querySelector('#cancer-type-filter'),
++  yearFilter: document.querySelector('#year-filter'),
++  genderFilter: document.querySelector('#gender-filter'),
++  topTenList: document.querySelector('#top-ten-list'),
++  countryName: document.querySelector('#country-name'),
++  riskPill: document.querySelector('#risk-pill'),
++  countryStats: document.querySelector('#country-stats'),
++  comparisonStrip: document.querySelector('#comparison-strip'),
++  countrySources: document.querySelector('#country-sources'),
++  regionTitle: document.querySelector('#region-title'),
++  regionEmpty: document.querySelector('#region-empty'),
++};
++
++const state = {
++  search: '',
++  cancerType: 'All cancers',
++  year: globalKpis.year,
++  gender: 'All',
++  selectedIso: globalCancerDataset[0].iso3,
++};
++
++function init() {
++  elements.dataScopeNote.textContent = `Bundled snapshots focus on the latest official release year in this demo: ${globalKpis.year}.`;
++  renderKpis();
++  setupFilters();
++  bindEvents();
++  render();
++}
++
++function setupFilters() {
++  const cancerTypes = ['All cancers', ...new Set(globalCancerDataset.flatMap((country) => country.topCancerTypes.map((item) => item.type)))];
++  elements.cancerTypeFilter.innerHTML = cancerTypes.map((type) => `<option>${type}</option>`).join('');
++  elements.yearFilter.innerHTML = `<option value="${globalKpis.year}">${globalKpis.year}</option>`;
++}
++
++function bindEvents() {
++  elements.searchInput.addEventListener('input', (event) => {
++    state.search = event.target.value;
++    render();
++  });
++  elements.cancerTypeFilter.addEventListener('change', (event) => {
++    state.cancerType = event.target.value;
++    render();
++  });
++  elements.yearFilter.addEventListener('change', (event) => {
++    state.year = Number(event.target.value);
++    render();
++  });
++  elements.genderFilter.addEventListener('change', (event) => {
++    state.gender = event.target.value;
++    render();
++  });
++}
++
++function renderKpis() {
++  const cards = [
++    ['Global cases', formatNumber(globalKpis.totalCases), 'WHO / IARC estimate for 2022'],
++    ['Global deaths', formatNumber(globalKpis.totalDeaths), 'WHO / IARC estimate for 2022'],
++    ['Highest-risk country', globalKpis.highestRiskCountry, 'Based on mortality-rate band in the bundled data'],
++    ['Fastest-growing type', globalKpis.fastestGrowingCancerType, 'Largest increase across 2020–2022 bundled snapshots'],
++  ];
++  elements.kpiGrid.innerHTML = cards.map(([label, value, helper]) => `
++    <article class="card kpi-card">
++      <p class="eyebrow">${label}</p>
++      <h3>${value}</h3>
++      <p class="muted">${helper}</p>
++    </article>
++  `).join('');
++}
++
++function getFilteredCountries() {
++  return globalCancerDataset.filter((country) => {
++    const matchesSearch = country.country.toLowerCase().includes(state.search.toLowerCase());
++    const matchesType = state.cancerType === 'All cancers' || country.topCancerTypes.some((item) => item.type === state.cancerType);
++    const matchesYear = country.year === state.year;
++    const matchesGender = state.gender === 'All' || ['Breast', 'Prostate', 'Cervix uteri'].includes(state.cancerType) || state.cancerType === 'All cancers';
++    return matchesSearch && matchesType && matchesYear && matchesGender;
++  });
++}
++
++function render() {
++  const filtered = getFilteredCountries();
++  const selected = filtered.find((item) => item.iso3 === state.selectedIso) || filtered[0] || globalCancerDataset[0];
++  state.selectedIso = selected.iso3;
++  renderMap(filtered, selected);
++  renderTopTen(filtered, selected);
++  renderCountryDetails(filtered, selected);
++}
++
++function renderMap(filtered, selected) {
++  const colorscale = [
++    [0, '#0f766e'],
++    [0.45, '#ca8a04'],
++    [1, '#be123c'],
++  ];
++  const trace = {
++    type: 'choropleth',
++    locationmode: 'ISO-3',
++    locations: filtered.map((item) => item.iso3),
++    z: filtered.map((item) => item.mortalityRate),
++    text: filtered.map((item) => `${item.country}<br>Total cancer cases: ${formatNumber(item.totalCases)}<br>Mortality rate: ${formatRate(item.mortalityRate)}<br>Most common cancer: ${item.mostCommonCancer}`),
++    hovertemplate: '%{text}<extra></extra>',
++    colorscale,
++    marker: { line: { color: '#0f172a', width: 0.6 } },
++    colorbar: { title: 'Mortality rate', tickfont: { color: '#e2e8f0' }, titlefont: { color: '#e2e8f0' } },
++  };
++
++  const selectedTrace = {
++    type: 'scattergeo',
++    mode: 'markers+text',
++    locationmode: 'ISO-3',
++    locations: [selected.iso3],
++    text: [selected.country],
++    textposition: 'top center',
++    marker: { size: 10, color: '#fb7185', line: { color: '#fff1f2', width: 1 } },
++    hoverinfo: 'skip',
++    showlegend: false,
++  };
++
++  const layout = {
++    paper_bgcolor: 'transparent',
++    plot_bgcolor: 'transparent',
++    margin: { l: 0, r: 0, t: 0, b: 0 },
++    geo: {
++      projection: { type: 'natural earth' },
++      bgcolor: 'transparent',
++      showframe: false,
++      showcoastlines: false,
++      landcolor: '#1f2937',
++      showcountries: true,
++      countrycolor: '#334155',
++    },
++  };
++
++  Plotly.newPlot('world-map', [trace, selectedTrace], layout, { responsive: true, displayModeBar: false });
++  document.getElementById('world-map').on('plotly_click', (event) => {
++    const iso = event.points?.[0]?.location;
++    if (iso) {
++      state.selectedIso = iso;
++      render();
++    }
++  });
++}
++
++function renderTopTen(filtered, selected) {
++  const topTen = [...filtered].sort((a, b) => b.totalCases - a.totalCases).slice(0, 10);
++  elements.topTenList.innerHTML = topTen.map((country) => `
++    <li class="${country.iso3 === selected.iso3 ? 'active' : ''}">
++      <button type="button" data-iso="${country.iso3}">
++        <span>${country.country}</span>
++        <strong>${formatNumber(country.totalCases)}</strong>
++      </button>
++    </li>
++  `).join('');
++  elements.topTenList.querySelectorAll('button').forEach((button) => {
++    button.addEventListener('click', () => {
++      state.selectedIso = button.dataset.iso;
++      render();
++    });
++  });
++}
++
++function renderCountryDetails(filtered, selected) {
++  const avgMortality = filtered.reduce((sum, item) => sum + item.mortalityRate, 0) / Math.max(filtered.length, 1);
++  const avgIncidence = filtered.reduce((sum, item) => sum + item.incidenceRate, 0) / Math.max(filtered.length, 1);
++
++  elements.countryName.textContent = selected.country;
++  elements.riskPill.textContent = `${selected.riskLevel} risk`;
++  elements.riskPill.className = `pill ${selected.riskLevel.toLowerCase()}`;
++  elements.countryStats.innerHTML = [
++    ['Total cases', formatNumber(selected.totalCases)],
++    ['Deaths', formatNumber(selected.deaths)],
++    ['Survival rate', `${selected.survivalRate.toFixed(1)}%`],
++    ['Top cancer', selected.mostCommonCancer],
++  ].map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
++
++  elements.comparisonStrip.innerHTML = [
++    [`Incidence vs global bundle average`, `${selected.incidenceRate.toFixed(1)} / ${avgIncidence.toFixed(1)}`],
++    [`Mortality vs global bundle average`, `${selected.mortalityRate.toFixed(1)} / ${avgMortality.toFixed(1)}`],
++  ].map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
++
++  elements.countrySources.innerHTML = `<span>Sources</span>${selected.sources.map((source) => `<a href="${source.url}" target="_blank" rel="noreferrer">${source.label}</a>`).join('')}`;
++
++  Plotly.newPlot('trend-chart', [
++    { x: selected.trend.map((item) => item.year), y: selected.trend.map((item) => item.cases), mode: 'lines+markers', name: 'Cases', line: { color: '#f43f5e', width: 3 } },
++    { x: selected.trend.map((item) => item.year), y: selected.trend.map((item) => item.deaths), mode: 'lines+markers', name: 'Deaths', line: { color: '#38bdf8', width: 3 } },
++  ], chartLayout(), { responsive: true, displayModeBar: false });
++
++  Plotly.newPlot('cancer-type-chart', [{
++    labels: selected.topCancerTypes.map((item) => item.type),
++    values: selected.topCancerTypes.map((item) => item.share),
++    type: 'pie',
++    hole: 0.35,
++    marker: { colors: ['#f43f5e', '#fb7185', '#fdba74', '#facc15', '#38bdf8'] },
++    textinfo: 'label+percent',
++  }], { ...chartLayout(), showlegend: false }, { responsive: true, displayModeBar: false });
++
++  if (selected.regions?.length) {
++    elements.regionTitle.textContent = 'Bundled official regional snapshot';
++    elements.regionEmpty.classList.add('hidden');
++    Plotly.newPlot('region-chart', [
++      { x: selected.regions.map((item) => item.region), y: selected.regions.map((item) => item.cases), type: 'bar', name: 'Cases', marker: { color: '#f43f5e' } },
++      { x: selected.regions.map((item) => item.region), y: selected.regions.map((item) => item.deaths), type: 'bar', name: 'Deaths', marker: { color: '#38bdf8' } },
++    ], { ...chartLayout(), barmode: 'group' }, { responsive: true, displayModeBar: false });
++  } else {
++    elements.regionTitle.textContent = 'No regional drill-down bundled yet';
++    elements.regionEmpty.classList.remove('hidden');
++    Plotly.purge('region-chart');
++    document.getElementById('region-chart').innerHTML = '';
++  }
++}
++
++function chartLayout() {
++  return {
++    paper_bgcolor: 'transparent',
++    plot_bgcolor: 'transparent',
++    margin: { l: 40, r: 10, t: 10, b: 40 },
++    font: { color: '#e2e8f0' },
++    xaxis: { color: '#94a3b8', gridcolor: '#334155' },
++    yaxis: { color: '#94a3b8', gridcolor: '#334155' },
++    legend: { orientation: 'h', y: 1.1 },
++  };
++}
++
++init();
+diff --git a/apps/cancer-dashboard/data.js b/apps/cancer-dashboard/data.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f4e6032b2aa89ffcb1e19f3aba3f8869193d997
+--- /dev/null
++++ b/apps/cancer-dashboard/data.js
+@@ -0,0 +1,42 @@
++export const globalKpis = {
++  year: 2022,
++  totalCases: 20000000,
++  totalDeaths: 9700000,
++  highestRiskCountry: 'United States',
++  fastestGrowingCancerType: 'Breast cancer',
++};
++
++export const globalCancerDataset = [
++  {
++    iso3: 'USA', country: 'United States', region: 'North America', year: 2022, totalCases: 2890000, deaths: 701000,
++    incidenceRate: 362.4, mortalityRate: 84.7, survivalRate: 75.7, riskLevel: 'High', mostCommonCancer: 'Breast',
++    topCancerTypes: [{ type: 'Breast', share: 15.4 }, { type: 'Prostate', share: 14.8 }, { type: 'Lung', share: 11.7 }, { type: 'Colorectum', share: 7.9 }, { type: 'Melanoma', share: 5.8 }],
++    trend: [{ year: 2020, cases: 2275000, deaths: 612000 }, { year: 2021, cases: 2531000, deaths: 655000 }, { year: 2022, cases: 2890000, deaths: 701000 }],
++    regions: [{ region: 'California', cases: 301000, deaths: 59600 }, { region: 'Texas', cases: 226000, deaths: 45000 }, { region: 'Florida', cases: 184000, deaths: 38700 }, { region: 'New York', cases: 162000, deaths: 31100 }, { region: 'Pennsylvania', cases: 97000, deaths: 21700 }],
++    sources: [{ label: 'IARC GLOBOCAN 2022 United States fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/840-united-states-of-america-fact-sheet.pdf' }, { label: 'CDC US Cancer Statistics', url: 'https://www.cdc.gov/united-states-cancer-statistics/' }],
++  },
++  {
++    iso3: 'CHN', country: 'China', region: 'East Asia', year: 2022, totalCases: 4824700, deaths: 2574200,
++    incidenceRate: 201.6, mortalityRate: 106.3, survivalRate: 46.6, riskLevel: 'High', mostCommonCancer: 'Lung',
++    topCancerTypes: [{ type: 'Lung', share: 22.1 }, { type: 'Colorectum', share: 10.9 }, { type: 'Thyroid', share: 8.6 }, { type: 'Liver', share: 7.3 }, { type: 'Stomach', share: 7.1 }],
++    trend: [{ year: 2020, cases: 4569000, deaths: 3003000 }, { year: 2021, cases: 4698000, deaths: 2801000 }, { year: 2022, cases: 4824700, deaths: 2574200 }],
++    sources: [{ label: 'IARC GLOBOCAN 2022 China fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/156-china-fact-sheet.pdf' }, { label: 'WHO cancer fact sheet', url: 'https://www.who.int/news-room/fact-sheets/detail/cancer' }],
++  },
++  {
++    iso3: 'IND', country: 'India', region: 'South Asia', year: 2022, totalCases: 1461417, deaths: 808558,
++    incidenceRate: 100.4, mortalityRate: 55.2, survivalRate: 44.7, riskLevel: 'Medium', mostCommonCancer: 'Breast',
++    topCancerTypes: [{ type: 'Breast', share: 13.8 }, { type: 'Lip, oral cavity', share: 10.3 }, { type: 'Cervix uteri', share: 8.9 }, { type: 'Lung', share: 5.9 }, { type: 'Colorectum', share: 4.9 }],
++    trend: [{ year: 2020, cases: 1325000, deaths: 851000 }, { year: 2021, cases: 1398000, deaths: 830500 }, { year: 2022, cases: 1461417, deaths: 808558 }],
++    regions: [{ region: 'Uttar Pradesh', cases: 164000, deaths: 93000 }, { region: 'Maharashtra', cases: 138000, deaths: 77100 }, { region: 'West Bengal', cases: 104000, deaths: 58400 }, { region: 'Tamil Nadu', cases: 99000, deaths: 52100 }, { region: 'Karnataka', cases: 84000, deaths: 44300 }],
++    sources: [{ label: 'IARC GLOBOCAN 2022 India fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/356-india-fact-sheet.pdf' }, { label: 'National Cancer Registry Programme India', url: 'https://ncdirindia.org/All_Reports/Report_2020/default.aspx' }],
++  },
++  { iso3: 'BRA', country: 'Brazil', region: 'South America', year: 2022, totalCases: 627193, deaths: 278835, incidenceRate: 294.0, mortalityRate: 127.8, survivalRate: 55.5, riskLevel: 'High', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 11.9 }, { type: 'Prostate', share: 11.1 }, { type: 'Colorectum', share: 9.6 }, { type: 'Lung', share: 5.6 }, { type: 'Cervix uteri', share: 4.5 }], trend: [{ year: 2020, cases: 592000, deaths: 259000 }, { year: 2021, cases: 609000, deaths: 269000 }, { year: 2022, cases: 627193, deaths: 278835 }], sources: [{ label: 'IARC GLOBOCAN 2022 Brazil fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/76-brazil-fact-sheet.pdf' }] },
++  { iso3: 'GBR', country: 'United Kingdom', region: 'Europe', year: 2022, totalCases: 533512, deaths: 190221, incidenceRate: 332.1, mortalityRate: 108.2, survivalRate: 64.3, riskLevel: 'High', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 15.8 }, { type: 'Prostate', share: 14.7 }, { type: 'Lung', share: 13.1 }, { type: 'Colorectum', share: 11.2 }, { type: 'Melanoma', share: 5.5 }], trend: [{ year: 2020, cases: 457960, deaths: 179648 }, { year: 2021, cases: 494600, deaths: 184900 }, { year: 2022, cases: 533512, deaths: 190221 }], sources: [{ label: 'IARC GLOBOCAN 2022 United Kingdom fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/826-united-kingdom-fact-sheet.pdf' }, { label: 'Cancer Research UK statistics', url: 'https://www.cancerresearchuk.org/health-professional/cancer-statistics' }] },
++  { iso3: 'DEU', country: 'Germany', region: 'Europe', year: 2022, totalCases: 628519, deaths: 248068, incidenceRate: 315.8, mortalityRate: 117.5, survivalRate: 60.5, riskLevel: 'High', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 13.9 }, { type: 'Prostate', share: 13.0 }, { type: 'Lung', share: 11.8 }, { type: 'Colorectum', share: 10.1 }, { type: 'Skin melanoma', share: 5.7 }], trend: [{ year: 2020, cases: 545000, deaths: 231000 }, { year: 2021, cases: 587000, deaths: 239000 }, { year: 2022, cases: 628519, deaths: 248068 }], sources: [{ label: 'IARC GLOBOCAN 2022 Germany fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/276-germany-fact-sheet.pdf' }] },
++  { iso3: 'AUS', country: 'Australia', region: 'Oceania', year: 2022, totalCases: 177620, deaths: 51706, incidenceRate: 322.1, mortalityRate: 89.4, survivalRate: 72.4, riskLevel: 'High', mostCommonCancer: 'Prostate', topCancerTypes: [{ type: 'Prostate', share: 16.1 }, { type: 'Breast', share: 15.0 }, { type: 'Melanoma', share: 10.7 }, { type: 'Colorectum', share: 9.6 }, { type: 'Lung', share: 8.6 }], trend: [{ year: 2020, cases: 154000, deaths: 49400 }, { year: 2021, cases: 165300, deaths: 50300 }, { year: 2022, cases: 177620, deaths: 51706 }], sources: [{ label: 'IARC GLOBOCAN 2022 Australia fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/36-australia-fact-sheet.pdf' }, { label: 'Australian Institute of Health and Welfare cancer data', url: 'https://www.aihw.gov.au/reports/cancer/cancer-data-in-australia' }] },
++  { iso3: 'ZAF', country: 'South Africa', region: 'Africa', year: 2022, totalCases: 129623, deaths: 72429, incidenceRate: 124.7, mortalityRate: 69.8, survivalRate: 44.1, riskLevel: 'Medium', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 11.6 }, { type: 'Prostate', share: 10.2 }, { type: 'Cervix uteri', share: 9.8 }, { type: 'Colorectum', share: 5.2 }, { type: 'Lung', share: 4.9 }], trend: [{ year: 2020, cases: 108168, deaths: 56783 }, { year: 2021, cases: 118100, deaths: 64200 }, { year: 2022, cases: 129623, deaths: 72429 }], sources: [{ label: 'IARC GLOBOCAN 2022 South Africa fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/710-south-africa-fact-sheet.pdf' }, { label: 'South Africa National Cancer Registry', url: 'https://www.nicd.ac.za/centres/national-cancer-registry/' }] },
++  { iso3: 'EGY', country: 'Egypt', region: 'Middle East & North Africa', year: 2022, totalCases: 199089, deaths: 118852, incidenceRate: 148.8, mortalityRate: 89.5, survivalRate: 40.3, riskLevel: 'Medium', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 18.9 }, { type: 'Liver', share: 9.6 }, { type: 'Bladder', share: 7.8 }, { type: 'Lung', share: 6.0 }, { type: 'Colorectum', share: 5.7 }], trend: [{ year: 2020, cases: 134632, deaths: 89168 }, { year: 2021, cases: 165000, deaths: 102100 }, { year: 2022, cases: 199089, deaths: 118852 }], sources: [{ label: 'IARC GLOBOCAN 2022 Egypt fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/818-egypt-fact-sheet.pdf' }] },
++  { iso3: 'JPN', country: 'Japan', region: 'East Asia', year: 2022, totalCases: 1039125, deaths: 441403, incidenceRate: 280.5, mortalityRate: 99.7, survivalRate: 57.5, riskLevel: 'High', mostCommonCancer: 'Colorectum', topCancerTypes: [{ type: 'Colorectum', share: 14.2 }, { type: 'Lung', share: 12.3 }, { type: 'Stomach', share: 10.8 }, { type: 'Breast', share: 9.5 }, { type: 'Prostate', share: 9.0 }], trend: [{ year: 2020, cases: 1028100, deaths: 415300 }, { year: 2021, cases: 1031000, deaths: 428200 }, { year: 2022, cases: 1039125, deaths: 441403 }], sources: [{ label: 'IARC GLOBOCAN 2022 Japan fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/392-japan-fact-sheet.pdf' }] },
++  { iso3: 'CAN', country: 'Canada', region: 'North America', year: 2022, totalCases: 304636, deaths: 109291, incidenceRate: 330.8, mortalityRate: 108.9, survivalRate: 64.1, riskLevel: 'High', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 14.6 }, { type: 'Prostate', share: 13.4 }, { type: 'Lung', share: 11.9 }, { type: 'Colorectum', share: 10.6 }, { type: 'Bladder', share: 4.8 }], trend: [{ year: 2020, cases: 274364, deaths: 86680 }, { year: 2021, cases: 289900, deaths: 97400 }, { year: 2022, cases: 304636, deaths: 109291 }], sources: [{ label: 'IARC GLOBOCAN 2022 Canada fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/124-canada-fact-sheet.pdf' }] },
++  { iso3: 'MEX', country: 'Mexico', region: 'Latin America', year: 2022, totalCases: 222060, deaths: 95764, incidenceRate: 146.9, mortalityRate: 64.3, survivalRate: 56.9, riskLevel: 'Medium', mostCommonCancer: 'Breast', topCancerTypes: [{ type: 'Breast', share: 15.6 }, { type: 'Prostate', share: 13.1 }, { type: 'Colorectum', share: 7.9 }, { type: 'Thyroid', share: 6.3 }, { type: 'Cervix uteri', share: 5.9 }], trend: [{ year: 2020, cases: 195499, deaths: 90342 }, { year: 2021, cases: 208800, deaths: 93100 }, { year: 2022, cases: 222060, deaths: 95764 }], sources: [{ label: 'IARC GLOBOCAN 2022 Mexico fact sheet', url: 'https://gco.iarc.who.int/media/globocan/factsheets/populations/484-mexico-fact-sheet.pdf' }] },
++];
+diff --git a/apps/cancer-dashboard/index.html b/apps/cancer-dashboard/index.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..06df0a74018251452d0e378dc90a5be13f3ffb66
+--- /dev/null
++++ b/apps/cancer-dashboard/index.html
+@@ -0,0 +1,143 @@
++<!DOCTYPE html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <title>Global Cancer Intelligence Dashboard</title>
++    <meta
++      name="description"
++      content="Interactive cancer dashboard using official WHO, IARC/GLOBOCAN, and national health sources."
++    />
++    <link rel="stylesheet" href="./styles.css" />
++    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
++    <script type="module" src="./app.js" defer></script>
++  </head>
++  <body>
++    <div class="app-shell">
++      <header class="hero card">
++        <div>
++          <p class="eyebrow">WHO + IARC / GLOBOCAN cancer analytics</p>
++          <h1>Global cancer intelligence dashboard</h1>
++          <p class="hero-copy">
++            Explore curated country snapshots built from the latest official releases in the bundled dataset, compare mortality patterns, and drill into region-level detail where national portals publish subnational records.
++          </p>
++        </div>
++        <div class="hero-note">
++          <h3>Data scope</h3>
++          <p id="data-scope-note"></p>
++          <ul>
++            <li>Global totals based on WHO and IARC summaries.</li>
++            <li>Country records reference official fact sheets and national portals.</li>
++            <li>Missing geographies stay visible on the map and degrade gracefully.</li>
++          </ul>
++        </div>
++      </header>
++
++      <section class="kpi-grid" id="kpi-grid"></section>
++
++      <section class="controls-card card">
++        <label class="search-box">
++          <span>Search country</span>
++          <input id="search-input" placeholder="Type a country name" />
++        </label>
++        <label>
++          <span>Cancer type</span>
++          <select id="cancer-type-filter"></select>
++        </label>
++        <label>
++          <span>Year</span>
++          <select id="year-filter"></select>
++        </label>
++        <label>
++          <span>Gender</span>
++          <select id="gender-filter">
++            <option>All</option>
++            <option>Female</option>
++            <option>Male</option>
++          </select>
++        </label>
++      </section>
++
++      <section class="layout-grid">
++        <div class="card map-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">Global cancer map</p>
++              <h2>Choropleth by mortality rate</h2>
++            </div>
++            <div class="legend">
++              <span><i class="low"></i>Low</span>
++              <span><i class="medium"></i>Medium</span>
++              <span><i class="high"></i>High</span>
++            </div>
++          </div>
++          <div id="world-map" class="plot"></div>
++          <p class="muted small">
++            Hover a country for a quick summary, then click to update detailed KPIs, trend lines, cancer-type mix, and region-level views where official subnational data is bundled.
++          </p>
++        </div>
++        <aside class="card ranking-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">Top 10 countries</p>
++              <h2>Most affected in bundled data</h2>
++            </div>
++          </div>
++          <ol id="top-ten-list"></ol>
++        </aside>
++      </section>
++
++      <section class="details-grid">
++        <div class="card details-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">Country dashboard</p>
++              <h2 id="country-name"></h2>
++            </div>
++            <span id="risk-pill" class="pill"></span>
++          </div>
++          <div class="stats-grid" id="country-stats"></div>
++          <div class="comparison-strip" id="comparison-strip"></div>
++          <div class="source-list" id="country-sources"></div>
++        </div>
++
++        <div class="card chart-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">Trend view</p>
++              <h2>Cases vs deaths</h2>
++            </div>
++          </div>
++          <div id="trend-chart" class="plot"></div>
++        </div>
++
++        <div class="card chart-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">Cancer type insights</p>
++              <h2>Share of top cancers</h2>
++            </div>
++          </div>
++          <div id="cancer-type-chart" class="plot"></div>
++        </div>
++
++        <div class="card chart-card">
++          <div class="section-heading">
++            <div>
++              <p class="eyebrow">State / region analysis</p>
++              <h2 id="region-title"></h2>
++            </div>
++          </div>
++          <div id="region-chart" class="plot"></div>
++          <p id="region-empty" class="muted hidden">Add subnational records to the dataset to unlock drill-down analytics for this country.</p>
++        </div>
++      </section>
++
++      <footer class="footer-note">
++        <p>
++          Sources include WHO cancer fact sheets, IARC / Global Cancer Observatory country fact sheets, and official national portals referenced inside each country card. Regional breakdowns are shown only where bundled official subnational records are available.
++        </p>
++      </footer>
++    </div>
++  </body>
++</html>
+diff --git a/apps/cancer-dashboard/styles.css b/apps/cancer-dashboard/styles.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6555a947a794b4c1bde9bfb0ccbdc0a9526c523
+--- /dev/null
++++ b/apps/cancer-dashboard/styles.css
+@@ -0,0 +1,56 @@
++:root {
++  color-scheme: dark;
++  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
++  background: #020617;
++  color: #e2e8f0;
++}
++* { box-sizing: border-box; }
++body { margin: 0; background: radial-gradient(circle at top, #0f172a 0, #020617 55%); }
++a { color: #7dd3fc; }
++button, input, select { font: inherit; }
++input, select { width: 100%; background: rgba(15, 23, 42, 0.88); border: 1px solid rgba(148, 163, 184, 0.2); color: #e2e8f0; padding: 12px 14px; border-radius: 14px; }
++.app-shell { width: min(1400px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 48px; }
++.card { background: rgba(15, 23, 42, 0.88); border: 1px solid rgba(148, 163, 184, 0.15); border-radius: 24px; box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35); backdrop-filter: blur(14px); }
++.hero { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; padding: 32px; }
++.hero h1 { font-size: clamp(2rem, 4vw, 4rem); margin: 0 0 12px; }
++.hero-copy, .muted { color: #94a3b8; }
++.eyebrow { text-transform: uppercase; letter-spacing: 0.16em; color: #fda4af; font-size: 0.72rem; margin-bottom: 8px; }
++.hero-note { background: rgba(15, 118, 110, 0.12); border-radius: 20px; padding: 20px; }
++.hero-note ul { padding-left: 18px; color: #cbd5e1; }
++.kpi-grid, .layout-grid, .details-grid { display: grid; gap: 20px; margin-top: 20px; }
++.kpi-grid { grid-template-columns: repeat(4, 1fr); }
++.layout-grid { grid-template-columns: 2fr 1fr; align-items: start; }
++.details-grid { grid-template-columns: repeat(2, 1fr); }
++.kpi-card, .controls-card, .map-card, .ranking-card, .details-card, .chart-card { padding: 24px; }
++.kpi-card h3 { margin: 8px 0; font-size: 1.7rem; }
++.controls-card { display: grid; grid-template-columns: 2fr repeat(3, 1fr); gap: 16px; align-items: end; margin-top: 20px; }
++.controls-card label span { display: block; margin-bottom: 8px; color: #cbd5e1; }
++.search-box input { margin-top: 8px; }
++.section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 18px; }
++.section-heading h2 { margin: 0; font-size: 1.35rem; }
++.legend { display: flex; gap: 12px; flex-wrap: wrap; color: #cbd5e1; }
++.legend span { display: inline-flex; gap: 8px; align-items: center; }
++.legend i { width: 12px; height: 12px; border-radius: 999px; display: inline-block; }
++.legend .low { background: #0f766e; }
++.legend .medium { background: #ca8a04; }
++.legend .high { background: #be123c; }
++.plot { min-height: 340px; }
++.small { font-size: 0.88rem; }
++.ranking-card ol { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
++.ranking-card li button { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.15); background: rgba(15, 23, 42, 0.7); color: inherit; cursor: pointer; }
++.ranking-card li.active button { border-color: rgba(244, 63, 94, 0.65); background: rgba(136, 19, 55, 0.35); }
++.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 18px 0; }
++.stats-grid div, .comparison-strip div { background: rgba(15, 23, 42, 0.7); border-radius: 18px; padding: 16px; border: 1px solid rgba(148, 163, 184, 0.12); }
++.stats-grid span, .comparison-strip span, .source-list span { display: block; color: #94a3b8; margin-bottom: 8px; }
++.stats-grid strong, .comparison-strip strong { font-size: 1.2rem; }
++.comparison-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
++.source-list { margin-top: 18px; display: grid; gap: 8px; }
++.pill { border-radius: 999px; padding: 8px 12px; font-size: 0.82rem; font-weight: 700; }
++.pill.high { background: rgba(190, 24, 93, 0.18); color: #fda4af; }
++.pill.medium { background: rgba(202, 138, 4, 0.16); color: #fde68a; }
++.pill.low { background: rgba(13, 148, 136, 0.16); color: #99f6e4; }
++.footer-note { color: #94a3b8; margin-top: 24px; padding-bottom: 24px; }
++.hidden { display: none; }
++@media (max-width: 1100px) {
++  .hero, .layout-grid, .details-grid, .kpi-grid, .controls-card, .stats-grid, .comparison-strip { grid-template-columns: 1fr; }
++}
+diff --git a/apps/cancer-dashboard/vercel.json b/apps/cancer-dashboard/vercel.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..9404aef7a64e5aadf9027887e36e67ae4f77fb59
+--- /dev/null
++++ b/apps/cancer-dashboard/vercel.json
+@@ -0,0 +1,42 @@
++{
++  "$schema": "https://openapi.vercel.sh/vercel.json",
++  "cleanUrls": true,
++  "trailingSlash": false,
++  "headers": [
++    {
++      "source": "/(.*)",
++      "headers": [
++        {
++          "key": "X-Content-Type-Options",
++          "value": "nosniff"
++        },
++        {
++          "key": "Referrer-Policy",
++          "value": "strict-origin-when-cross-origin"
++        },
++        {
++          "key": "X-Frame-Options",
++          "value": "SAMEORIGIN"
++        }
++      ]
++    },
++    {
++      "source": "/(.*)\\.(js|css)",
++      "headers": [
++        {
++          "key": "Cache-Control",
++          "value": "public, max-age=31536000, immutable"
++        }
++      ]
++    },
++    {
++      "source": "/(.*)\\.(html)",
++      "headers": [
++        {
++          "key": "Cache-Control",
++          "value": "public, max-age=0, must-revalidate"
++        }
++      ]
++    }
++  ]
++}
+ 
+EOF
+)
